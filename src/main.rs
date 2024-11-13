@@ -128,6 +128,11 @@ fn square_number(src_filename: &str, dst_filename: &str, start_index: usize, siz
 }
 
 
+fn rename_file(src_filename: &str, dst_filename: &str) -> io::Result<()> {
+    std::fs::rename(src_filename, dst_filename)
+}
+
+
 fn main() {
 
 }
