@@ -1,0 +1,16 @@
+[package]
+name = "primes"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bit-vec = "0.6.3"
+log = "0.4.22"
+num-bigint = { version = "0.4.6", features = ["rand"] }
+serde = { version = "1.0.215", features = ["derive"] }
+bincode = "2.0.0-rc.3"
+memmap2 = "0.9.5"
+num-traits = "0.2.19"
+rand = "0.9.0-alpha.2"
