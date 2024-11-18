@@ -1,8 +1,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write, Read};
 use num_bigint::BigUint;
+use num_traits::Zero;
 
-const CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1 Megabyte
+// const CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1 Megabyte
+const CHUNK_SIZE: usize = 8; // 1 byte, for testing purposes
+
 
 fn read_chunk(filename: &str, chunk_index: usize) -> io::Result<BigUint> {
     let mut file = File::open(filename).map_err(|e| {
@@ -16,7 +19,7 @@ fn read_chunk(filename: &str, chunk_index: usize) -> io::Result<BigUint> {
     })?;
     let mut buffer = vec![0; CHUNK_SIZE];
     file.read_exact(&mut buffer).map_err(|e| {
-        eprintln!("Failed to read file: {}", e);
+        // eprintln!("Failed to read file: {}", e);
         e
     })?;
     let big_num = BigUint::from_bytes_le(&buffer);
@@ -52,14 +55,14 @@ fn write_chunk(filename: &str, chunk_index: usize, big_num: &BigUint) -> io::Res
 
 fn chunkify_number(num: &BigUint, block_index: usize) -> BigUint {
     // Define the number of u64 digits (limbs) in a 1 MB block
-    let u32_per_mb = 1024 * 1024 / 4;
+    let u32_per_block = CHUNK_SIZE / 4;
 
     // Get the u64 digits (limbs) of the BigUint
     let u32_digits = num.to_u32_digits();
 
     // Calculate the start and end indices for the desired block
-    let start = block_index * u32_per_mb;
-    let end = start + u32_per_mb;
+    let start = block_index * u32_per_block;
+    let end = start + u32_per_block;
 
     // Slice the u64_digits array to get the desired block
     let block_slice = if start < u32_digits.len() {
@@ -74,7 +77,7 @@ fn chunkify_number(num: &BigUint, block_index: usize) -> BigUint {
 }
 
 fn write_number_in_chunks(num: &BigUint, start_index: usize, filename: &str) -> io::Result<()>{
-    let size = ((num.bits() as f64 / 8.0) / CHUNK_SIZE as f64).ceil() as usize;
+    let size = number_size(num);
     for i in 0..size {
         let chunk = chunkify_number(num, i);
         write_chunk(filename, start_index + i, &chunk)?
@@ -99,40 +102,119 @@ fn read_number_in_chunks(start_index: usize, size: usize, filename: &str) -> io:
 }
 
 
-fn square_number(src_filename: &str, dst_filename: &str, start_index: usize, size: usize) -> io::Result<u64>{
-    // Squares the number in chunks and write the result back to the same file
-    // Designed to handle numbers larger than can be stored in memory at once
-    let end_index = start_index + size;
-    let mut final_size: u64 = 0; // Does it need to be this big?
-    for i in start_index..end_index {
-        for j in i..end_index {
-            let n1 = read_chunk(src_filename, i).unwrap();
-            let n2 = read_chunk(src_filename, j).unwrap();
-            let write_index = i + j - start_index; 
-            // This functionality means that the result will be written as if start_index is the actual start of the number
-            
-            let result = n1 * n2;
-            let res_size = ((result.bits() as f64 / 8.0) / CHUNK_SIZE as f64).ceil() as usize;
-            for i in 0..res_size {
-                let chunk = chunkify_number(&result, i);
-                let previous = read_chunk(dst_filename, write_index + i).unwrap();
-                write_chunk(dst_filename, write_index + i, &(chunk + previous)).unwrap();
-            }
-            
-            if i == j && i == end_index - 1{
-                final_size = (write_index + res_size) as u64;
-            }
-        }
-    }
-    Ok(final_size)
-}
-
-
 fn rename_file(src_filename: &str, dst_filename: &str) -> io::Result<()> {
     std::fs::rename(src_filename, dst_filename)
 }
 
 
-fn main() {
+fn clear_file(filename: &str) -> io::Result<()> {
+    let _ = std::fs::remove_file(filename);
+    let _ = File::create(filename)?;
+    Ok(())
+}
 
+fn number_size(num: &BigUint) -> usize {
+    let bytes_len = num.to_bytes_le().len();
+    let size = (bytes_len + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    size
+}
+
+fn square_number(
+    src_filename: &str,
+    start_index: usize,
+    size: usize,
+    dst_filename: &str,
+) -> io::Result<usize> {
+    let end_index: usize = start_index + size;
+    let mut final_size: usize = 0;
+    let mut carry: BigUint = BigUint::zero();
+    
+    clear_file(dst_filename)?;
+
+    for i in start_index..end_index {
+        let chunk_i = read_chunk(src_filename, i)?;
+        for j in i..end_index {
+            let chunk_j = if i == j {
+                chunk_i.clone()
+            } else {
+                read_chunk(src_filename, j)?
+            };
+            
+            let write_index = i + j - start_index;
+            let mut product = chunk_i.clone() * chunk_j.clone();
+            if i != j {
+                product += product.clone(); // TODO: probably a better way to do this
+            }
+            let previous = read_chunk(dst_filename, write_index).unwrap_or(BigUint::zero());
+            let result = product.clone() + previous.clone() + carry.clone();
+            let (lower, upper) = split_biguint(&result);
+            write_chunk(dst_filename, write_index, &lower)?;
+            carry = upper;
+            if write_index > final_size {
+                final_size = write_index;
+            }
+        }
+        if carry != BigUint::zero() {
+            let write_index = i + end_index - start_index;
+            write_chunk(dst_filename, write_index, &carry)?;
+            carry = BigUint::zero();
+            if write_index > final_size {
+                final_size = write_index;
+            }
+        }
+    }
+    
+    
+    
+    Ok(final_size + 1)
+
+}
+
+// Helper function to split a BigUint into lower and upper parts based on CHUNK_SIZE
+fn split_biguint(num: &BigUint) -> (BigUint, BigUint) {
+    let byte_size = CHUNK_SIZE;
+    let base = BigUint::from(1u8) << (byte_size * 8);
+    let lower = num.clone() % &base;
+    let upper = num.clone() / &base;
+    (lower, upper)
+}
+fn main() {
+    let mut num = BigUint::from(3u64);
+    let src_filename = "test1.dat";
+    let dst_filename = "test2.dat";
+    clear_file(src_filename).unwrap();
+    clear_file(dst_filename).unwrap();
+
+    // Testing the square_number function
+    write_number_in_chunks(&num, 0, src_filename).unwrap();
+    let mut size = 1;
+    let start_index = 0;
+    loop {
+        let num2 = num.clone() * num.clone();
+        size = square_number(src_filename, start_index, size, dst_filename).unwrap();
+        let result = read_number_in_chunks(start_index, size, dst_filename).unwrap();
+
+        // Swap files in a safe way
+        rename_file(dst_filename, "temp.dat").unwrap();
+        rename_file(src_filename, dst_filename).unwrap();
+        rename_file("temp.dat", src_filename).unwrap();
+
+        clear_file(dst_filename).unwrap();
+
+        // Check correctness
+        let diff = if num2 > result.clone() {
+            num2.clone() - result.clone()
+        } else {
+            result.clone() - num2.clone()
+        };
+
+        if diff == BigUint::from(0u32) {
+            println!("Good so far, size={:?}", size);
+        } else {
+            eprintln!("Something went wrong");
+            break;
+        }
+
+        num = num2;
+    }
 }
