@@ -1,11 +1,11 @@
+use std::clone::Clone;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write, Read};
 use num_bigint::BigUint;
-use num_traits::Zero;
+use num_traits::{One, Zero};
 
-// const CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1 Megabyte
-const CHUNK_SIZE: usize = 8; // 1 byte, for testing purposes
-
+const CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1 Megabyte
+// const CHUNK_SIZE: usize = 8; // 8 bytes, for testing purposes
 
 fn read_chunk(filename: &str, chunk_index: usize) -> io::Result<BigUint> {
     let mut file = File::open(filename).map_err(|e| {
@@ -55,7 +55,7 @@ fn write_chunk(filename: &str, chunk_index: usize, big_num: &BigUint) -> io::Res
 
 fn chunkify_number(num: &BigUint, block_index: usize) -> BigUint {
     // Define the number of u64 digits (limbs) in a 1 MB block
-    let u32_per_block = CHUNK_SIZE / 4;
+    let u32_per_block = ((CHUNK_SIZE as f64)  / 4.0).ceil() as usize;
 
     // Get the u64 digits (limbs) of the BigUint
     let u32_digits = num.to_u32_digits();
@@ -145,14 +145,19 @@ fn square_number(
             if i != j {
                 product += product.clone(); // TODO: probably a better way to do this
             }
-            let previous = read_chunk(dst_filename, write_index).unwrap_or(BigUint::zero());
+            let mut previous = BigUint::zero();
+            if write_index > final_size {
+                final_size = write_index;
+            }
+            else {
+                previous = read_chunk(dst_filename, write_index).unwrap_or(BigUint::zero());
+            }
+            
             let result = product.clone() + previous.clone() + carry.clone();
             let (lower, upper) = split_biguint(&result);
             write_chunk(dst_filename, write_index, &lower)?;
             carry = upper;
-            if write_index > final_size {
-                final_size = write_index;
-            }
+            
         }
         if carry != BigUint::zero() {
             let write_index = i + end_index - start_index;
@@ -179,9 +184,20 @@ fn split_biguint(num: &BigUint) -> (BigUint, BigUint) {
     (lower, upper)
 }
 fn main() {
-    let mut num = BigUint::from(3u64);
+    let n = 23; // The fermat index to be tested (the actual number would be 2^(2^n) + 1)
+    let mut result = BigUint::zero();
+    
+    
+    let mod_bits = 1 + (1 << n); // The number of bits in the fermat number
+    let max_size = (mod_bits - 1) / (CHUNK_SIZE * 8); // The maximum number of chunks needed to store the operand
+    
+
+    let MINUS_ONE: BigUint = (BigUint::from(1u32) << (CHUNK_SIZE * 8)) - BigUint::one();
+
+    let num = BigUint::from(3u64);
     let src_filename = "test1.dat";
     let dst_filename = "test2.dat";
+    let temp_filename = "temp.dat";
     clear_file(src_filename).unwrap();
     clear_file(dst_filename).unwrap();
 
@@ -189,32 +205,150 @@ fn main() {
     write_number_in_chunks(&num, 0, src_filename).unwrap();
     let mut size = 1;
     let start_index = 0;
+    let mut counter = 0;
     loop {
-        let num2 = num.clone() * num.clone();
-        size = square_number(src_filename, start_index, size, dst_filename).unwrap();
-        let result = read_number_in_chunks(start_index, size, dst_filename).unwrap();
-
-        // Swap files in a safe way
-        rename_file(dst_filename, "temp.dat").unwrap();
-        rename_file(src_filename, dst_filename).unwrap();
-        rename_file("temp.dat", src_filename).unwrap();
-
-        clear_file(dst_filename).unwrap();
-
-        // Check correctness
-        let diff = if num2 > result.clone() {
-            num2.clone() - result.clone()
-        } else {
-            result.clone() - num2.clone()
-        };
-
-        if diff == BigUint::from(0u32) {
-            println!("Good so far, size={:?}", size);
-        } else {
-            eprintln!("Something went wrong");
+        counter += 1;
+        if counter == 1 << n {
             break;
         }
+        size = square_number(src_filename, start_index, size, dst_filename).unwrap();
+        result = read_number_in_chunks(start_index, size, dst_filename).unwrap();
+        // Swap files in a safe way
+        rename_file(dst_filename, temp_filename).unwrap();
+        rename_file(src_filename, dst_filename).unwrap();
+        rename_file(temp_filename, src_filename).unwrap();
+        clear_file(dst_filename).unwrap();
+        
+        
+        // Taking the mod
+        // NOTE: We're writing directly to the source file here, make sure this doesn't destroy anything
+        while size > max_size {
+            println!("Modding");
+            // take the most significant chunk of the number
+            let msc = read_chunk(src_filename, size - 1).unwrap();
+            let to_subtract = msc.clone() - BigUint::one();
+            if to_subtract == BigUint::zero() {
+                if size - max_size == 1 {
+                    // Go over the number to make sure at least one chunk is not zero, apart from the msc
+                    let mut zeros = true;
+                    let mut i = 0;
+                    while i < max_size {
+                        let x = read_chunk(src_filename, size - 2 - i).unwrap();
+                        if x != BigUint::zero() {
+                            zeros = false;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if zeros {
+                        break;
+                    }
+                    else {
+                        // Subtract 1 from the whole number, and take out the msc
+                        let mut borrow = BigUint::zero();
+                        let mut i = 0;
+                        while i < max_size {
+                            let mut x = read_chunk(src_filename, size - 2 - i).unwrap();
+                            if x == BigUint::zero() {
+                                x = MINUS_ONE.clone();
+                                borrow = BigUint::one();
+                            }
+                            else {
+                                x -= BigUint::one();
+                                borrow = BigUint::zero();
+                            }
+                            write_chunk(src_filename, size - 2 - i, &x).unwrap();
+                            if borrow == BigUint::zero() {
+                                break;
+                            }
+                            i += 1;
+                        }
+                        write_chunk(src_filename, size - 1, &BigUint::zero()).unwrap();
+                        size -= 1;
+                        break;
+                    }
+                }
+                else {
+                    // The msc should be zero
+                    write_chunk(src_filename, size - 1, &BigUint::zero()).unwrap();
 
-        num = num2;
+                    let mut val = read_chunk(src_filename, size - 2).unwrap() + BigUint::one();
+
+                    // The second msc should be -1
+                    write_chunk(src_filename, size - 2, &MINUS_ONE).unwrap();
+
+
+                    // Subtract 1 from the sub_from chunk
+                    let mut borrow = BigUint::zero();
+                    let mut i = 0;
+                    while i == 0 || borrow != BigUint::zero() {
+                        let mut x = read_chunk(src_filename, size - 2 + i - max_size).unwrap();
+                        if i == 0 {
+                            if x > val {
+                                x -= val.clone();
+                            }
+                            else {
+                                x = x.clone() + (BigUint::one() << (CHUNK_SIZE * 8)) - val.clone();
+                                borrow = BigUint::one();
+                            }
+                        }
+                        else {
+                            if x == BigUint::zero() {
+                                x = MINUS_ONE.clone();
+                                borrow = BigUint::one();
+                            }
+                            else {
+                                x -= BigUint::one();
+                                borrow = BigUint::zero();
+                            }
+                        }
+                        write_chunk(src_filename, size - 2 + i - max_size, &x).unwrap();
+                    }
+                }
+            }
+            else {
+                write_chunk(src_filename, size - 1, &BigUint::one()).unwrap();
+                
+                let sub_from = size - max_size - 1;
+                
+                let mut borrow = BigUint::zero();
+                let mut i = 0;
+                while i == 0 || borrow != BigUint::zero() {
+                    if i == size - 1 {
+                        size -= 1
+                    }
+                    let mut x = read_chunk(
+                        src_filename,
+                        sub_from + i
+                    ).unwrap();
+                    if i == 0 {
+                        if x > to_subtract {
+                            x -= to_subtract.clone();
+                            borrow = BigUint::zero();
+                        }
+                        else {
+                            x = x.clone() + (BigUint::one() << (CHUNK_SIZE * 8)) - to_subtract.clone();
+                            borrow = BigUint::one();
+                        }
+                    }
+                    else {
+                        if x == BigUint::zero() {
+                            x = MINUS_ONE.clone();
+                            borrow = BigUint::one();
+                        }
+                        else {
+                            x -= BigUint::one();
+                            borrow = BigUint::zero();
+                        }
+                    }
+                    write_chunk(src_filename, sub_from + i, &x).unwrap();
+                    i += 1;
+                }
+            }
+        }
+        
+        result = read_number_in_chunks(0, size, src_filename).unwrap();
+        println!("3^{} % f_n, size={}", 1u64 << counter, size);
     }
+    println!("{}", result);
 }
